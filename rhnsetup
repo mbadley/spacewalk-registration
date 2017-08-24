@@ -1,0 +1,240 @@
+#!/bin/bash
+#Malcolm Badley
+#Satellite Client installation version 1.0 25th Feb 2015
+
+#determine satellite server
+unset SATSERVER
+SATSERVER=10.116.26.101
+
+echo "This script assumes you have an internet connection"
+
+#run from /root
+if [ ! -d /root ]; then
+	echo "/root not found"
+else
+	cd /root
+fi
+
+#test internet connection
+wget http://google.com/index.html
+if [ $? -ne "0" ]; then
+	echo "no internet connection"
+	exit 1
+else
+	rm -f index.html
+fi
+
+#has wget been installed?
+rpm -qa | grep '^wget\-[0-9]' > /dev/null
+if [ $? -ne "0" ]; then
+	echo "please install wget"
+fi
+
+#is yum already running?
+if [ -f /var/run/yum.pid ]; then
+        echo "yum running"
+        exit 1
+fi
+
+if [ -f /etc/redhat-release ]; then
+        RHEL=`cat /etc/redhat-release | sed 's/\./ /g' | awk '{print $3}'` 
+else
+        echo "/etc/redhat-release not installed"
+        exit 1
+fi
+
+#remove all yum repo files
+
+ls /etc/yum.repos.d/*.repo > /dev/null
+if [ $? -eq "0" ]; then
+        mv /etc/yum.repos.d/*.repo /root 
+fi
+
+#install temporary repositories
+set | grep http_proxy | tail -1 | grep '[0-9]$' > /dev/null
+if [ $? -eq "0" ]; then
+	PROXY=`set | grep http_proxy | tail -1 | grep '[0-9]$'`
+	unset http_proxy
+fi
+if [ "$RHEL" -eq "5" ]; then
+	if [ -f python-hashlib-20081119-4.el5.x86_64.rpm ]; then
+		rm -f python-hashlib-20081119-4.el5.x86_64.rpm
+	fi
+        wget -O /etc/yum.repos.d/spacewalk-el5-client.repo http://$SATSERVER/scripts/spacewalk5-client.repo
+	rpm -qa | grep python-hashlib > /dev/null
+	if [ $? -ne "0" ]; then
+		wget http://$SATSERVER/scripts/python-hashlib-20081119-4.el5.x86_64.rpm
+		rpm -ivh python-hashlib-20081119-4.el5.x86_64.rpm
+		rm -f python-hashlib-20081119-4.el5.x86_64.rpm
+	fi
+fi
+if [ "$RHEL" -eq "6" ]; then
+        wget -O /etc/yum.repos.d/spacewalk-el6-client.repo http://$SATSERVER/scripts/spacewalk6-client.repo
+fi
+
+#install latest repositories
+rpm -qa | grep spacewalk-client-repo > /dev/null
+if [ $? -eq "0" ]; then
+	rpm -e --nodeps spacewalk-client-repo
+fi
+rpm -qa | grep epel-release > /dev/null
+if [ $? -eq "0" ]; then
+	rpm -e --nodeps epel-release
+fi
+rpm -qa | grep centos-release > /dev/null
+if [ $? -eq "0" ]; then
+	rpm -e --nodeps centos-release
+fi
+
+echo $PROXY > /dev/null
+if [ $? -eq "0" ]; then
+	export $PROXY
+fi
+if [ "$RHEL" -eq "5" ]; then
+	rpm -Uvh http://yum.spacewalkproject.org/2.2-client/RHEL/5/x86_64/spacewalk-client-repo-2.2-1.el6.noarch.rpm
+	rpm -Uvh http://mirror.centos.org/centos/5/os/x86_64/CentOS/centos-release-5-11.el5.centos.x86_64.rpm 
+	BASEARCH=$(uname -i)
+	rpm -Uvh http://dl.fedoraproject.org/pub/epel/5/x86_64/epel-release-5-4.noarch.rpm
+fi
+
+if [ "$RHEL" -eq "6" ]; then
+	rpm -Uvh http://yum.spacewalkproject.org/2.2-client/RHEL/6/x86_64/spacewalk-client-repo-2.2-1.el6.noarch.rpm
+	rpm -Uvh http://mirror.centos.org/centos/6/os/x86_64/Packages/centos-release-6-6.el6.centos.12.2.x86_64.rpm
+	BASEARCH=$(uname -i)
+	rpm -Uvh http://dl.fedoraproject.org/pub/epel/6/$BASEARCH/epel-release-6-8.noarch.rpm
+fi
+
+echo $PROXY | grep http > /dev/null
+if [ $? -eq "0" ]; then
+	unset http_proxy
+fi
+
+#install client packages
+yum -y install rhn-client-tools rhn-check rhn-setup rhnsd m2crypto yum-rhn-plugin rhnlib
+
+rpm -qa | grep rhnlib > /dev/null
+if [ $? -ne "0" ]; then
+	echo "some client packages did not install"
+	exit 1
+fi
+
+#install config management tools
+yum -y install osad rhncfg rhncfg-actions rhncfg-client rhncfg-management
+
+rpm -qa | grep rhncfg > /dev/null
+if [ $? -ne "0" ]; then
+	echo "some config management tools did not install"
+	exit 1
+fi
+
+#allow remote actions
+rhn-actions-control --enable-all
+rhn-actions-control --report
+service osad start
+chkconfig osad on
+
+#have packages been installed?
+rpm -qa | grep rhn-client-tools > /dev/null
+if [ $? -ne "0" ]; then
+	echo "it appears that a client package has not been installed"
+fi
+
+#test connection to spacewalk
+unset http_proxy
+wget -O /root/connection http://$SATSERVER/connection 
+if [ $? -ne "0" ]; then
+	echo "cannot connect to $SATSERVER"
+fi
+if [ -f /root/connection ]; then
+	rm -f /root/connection
+fi
+
+#install spacewalk ca cert
+rpm -qa | grep rhn-org-trusted-ssl-cert > /dev/null
+if [ $? -eq "0" ]; then
+	rpm -e --nodeps rhn-org-trusted-ssl-cert
+fi
+rpm -Uvh http://$SATSERVER/pub/rhn-org-trusted-ssl-cert-1.0-1.noarch.rpm
+if [ $? -ne "0" ]; then
+	echo "cannot install ca cert"
+	exit 1
+fi
+
+#register to satellite using the base channel key 
+if [ "$RHEL" -eq "5" ]; then
+        rhnreg_ks --force --activationkey 1-bdae8d38be434de947e77c34348fe2e0 --serverUrl http://$SATSERVER/XMLRPC
+fi
+
+if [ "$RHEL" -eq "6" ]; then
+        rhnreg_ks --force --activationkey 1-0d76ee1f175f375c1540d0b02b4eef85 --serverUrl http://$SATSERVER/XMLRPC
+fi
+
+#remove all yum repo files
+ls /etc/yum.repos.d/*.repo > /dev/null
+if [ $? -eq "0" ]; then
+        rm -f /etc/yum.repos.d/*.repo
+fi
+
+#automate satellite check in
+if [ -f /etc/cron.d/rhn ]; then
+	rm -f /etc/cron.d/rhn
+fi
+
+wget -O /etc/cron.d/rhn http://$SATSERVER/rhn
+chmod 0600 /etc/cron.d/rhn
+chown root:root /etc/cron.d/rhn
+
+#use standard yum config
+if [ -f /etc/yum.conf ]; then
+        mv -f /etc/yum.conf /etc/yum.conf.`date | awk '{print $6$2$3}'`
+fi
+wget -O /etc/yum.conf http://$SATSERVER/yum.conf
+chmod 0644 /etc/yum.conf
+chown root:root /etc/yum.conf
+
+#clean up yum cache
+yum clean all
+yum clean metadata
+rm -fr /var/cache/yum/*
+
+#create yum cache
+yum makecache
+
+#rebuild rpm database
+ls /var/lib/rpm/*db\.[0-9][0-9][0-9] > /dev/null 
+if [ $? -eq "0" ]; then
+        rm -f /var/lib/rpm/*db\.[0-9][0-9][0-9] 
+fi 
+
+rpm --rebuilddb
+
+#check subscription to the base channel
+if [ "$RHEL" -eq "5" ]; then
+        yum repolist centos5-64bit | grep centos5-64bit > /dev/null
+        if [ $? -ne "0" ]; then
+                echo "check registration to $SATSERVER not subscribed to base channel centos5-64bit"
+                exit 1
+        else
+                echo "subscribed to base channel centos5-64bit"
+        fi
+fi
+
+if [ "$RHEL" -eq "6" ]; then
+        yum repolist centos6-64bit | grep centos6-64bit > /dev/null
+        if [ $? -ne "0" ]; then
+                echo "check registration to $SATSERVER not subscribed to base channel centos6-64bit"
+                exit 1
+        else
+                echo "subscribed to base channel centos6-64bit"
+        fi
+fi
+
+#ensure updates are not fetched from RHN 
+service rhnsd stop 
+chkconfig rhnsd off 
+service yum-updatesd stop 
+chkconfig yum-updatesd off
+
+#patch yum & rpm
+yum -y update yum rpm
+echo "$HOST registerred to satellite server $SATSERVER"
